@@ -13,8 +13,12 @@
  *   - MIDI events preserved for FaustProcessor, PluginProcessor, SamplerProcessor
  *   - Parameter automation preserved
  *   - RenderEngine graph structure preserved
+ * - Version 2 (0.8.4, aifi fork): FaustProcessor per-note expression state
+ *   - note_expr_{enabled,param,lo,hi,curve} added to FaustProcessor pickle
+ *   - Read-backward-compatible: a v1 pickle restores fine (the new keys are
+ *     guarded by .contains() and default to disabled).
  */
-#define DAWDREAMER_PICKLE_VERSION 1
+#define DAWDREAMER_PICKLE_VERSION 2
 
 namespace DawDreamerPickle
 {
@@ -34,9 +38,11 @@ inline int getVersion()
  */
 inline bool isCompatibleVersion(int version)
 {
-    // For now, we only support exact version match
-    // Future versions may support backward compatibility
-    return version == DAWDREAMER_PICKLE_VERSION;
+    // Accept the current version and any older version we can still read.
+    // Fields added in newer versions are guarded by .contains() in the
+    // per-processor setPickleState(), so an older pickle restores cleanly
+    // (missing fields fall back to their defaults).
+    return version >= 1 && version <= DAWDREAMER_PICKLE_VERSION;
 }
 
 /**
