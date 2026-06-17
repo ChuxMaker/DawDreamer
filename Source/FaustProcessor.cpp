@@ -185,8 +185,10 @@ void FaustProcessor::processBlock(juce::AudioSampleBuffer& buffer, juce::MidiBuf
                     // steps for playing MIDI
                     if (myMidiMessageSec.isNoteOn())
                     {
-                        m_dsp_poly->keyOn(midiChannel, myMidiMessageSec.getNoteNumber(),
-                                          myMidiMessageSec.getVelocity());
+                        MapUI* exprVoice =
+                            m_dsp_poly->keyOn(midiChannel, myMidiMessageSec.getNoteNumber(),
+                                              myMidiMessageSec.getVelocity());
+                        applyNoteExpression(exprVoice, myMidiMessageSec.getVelocity());
                     }
                     else if (myMidiMessageSec.isNoteOff())
                     {
@@ -218,8 +220,10 @@ void FaustProcessor::processBlock(juce::AudioSampleBuffer& buffer, juce::MidiBuf
                     // steps for playing MIDI
                     if (myMidiMessageQN.isNoteOn())
                     {
-                        m_dsp_poly->keyOn(midiChannel, myMidiMessageQN.getNoteNumber(),
-                                          myMidiMessageQN.getVelocity());
+                        MapUI* exprVoice =
+                            m_dsp_poly->keyOn(midiChannel, myMidiMessageQN.getNoteNumber(),
+                                              myMidiMessageQN.getVelocity());
+                        applyNoteExpression(exprVoice, myMidiMessageQN.getVelocity());
                     }
                     else if (myMidiMessageQN.isNoteOff())
                     {
