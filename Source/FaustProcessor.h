@@ -16,6 +16,7 @@
 #include <faust/gui/SoundUI.h>
 #include <faust/midi/rt-midi.h>
 
+#include <cmath>
 #include <map>
 
 #include "FaustArgvBuilder.h"
@@ -237,6 +238,40 @@ class FaustProcessor : public ProcessorBase
 
     void setReleaseLength(double sec);
 
+    // --- Per-note expression (Tier-A, aifi WS16) ---------------------------------
+    // When enabled, a per-voice parameter is set from each note's velocity at
+    // note-on: value = lo + (hi - lo) * (velocity/127)^curve. The value is written
+    // directly to the dsp_voice that keyOn() returns (a MapUI), so it is genuinely
+    // per-note and bypasses the grouped UI. This is the offline, deterministic,
+    // fork-only path the stock wheel cannot do; it supersedes the realize-side
+    // global running-gain "win A" hack. Default-off ⇒ byte-identical to stock.
+    void setNoteExpression(const std::string& param, double lo, double hi, double curve)
+    {
+        m_noteExprParam = param;
+        m_noteExprLo = lo;
+        m_noteExprHi = hi;
+        m_noteExprCurve = (curve > 0.0) ? curve : 1.0;
+        m_noteExprEnabled = !param.empty();
+    }
+
+    void clearNoteExpression() { m_noteExprEnabled = false; }
+
+    // Apply per-note expression to the voice a keyOn just returned. No-op unless
+    // enabled and voice is non-null. Static per note: set once at note start where
+    // amplitude is ~0 (no click), held constant for the note's duration. Re-asserted
+    // on each keyOn, so voice-stealing reuses get the new note's value.
+    void applyNoteExpression(MapUI* voice, int velocity)
+    {
+        if (!m_noteExprEnabled || voice == nullptr)
+            return;
+        double norm = double(velocity) / 127.0;
+        if (norm < 0.0) norm = 0.0;
+        if (norm > 1.0) norm = 1.0;
+        double shaped = (m_noteExprCurve == 1.0) ? norm : std::pow(norm, m_noteExprCurve);
+        voice->setParamValue(m_noteExprParam,
+                             FAUSTFLOAT(m_noteExprLo + (m_noteExprHi - m_noteExprLo) * shaped));
+    }
+
     nb::dict getPickleState()
     {
         nb::dict state;
@@ -269,6 +304,13 @@ class FaustProcessor : public ProcessorBase
         state["dynamic_voices"] = m_dynamicVoices;
         state["llvm_opt_level"] = m_llvmOptLevel;
         state["release_length"] = m_releaseLengthSec;
+
+        // Per-note expression (pickle v2)
+        state["note_expr_enabled"] = m_noteExprEnabled;
+        state["note_expr_param"] = m_noteExprParam;
+        state["note_expr_lo"] = m_noteExprLo;
+        state["note_expr_hi"] = m_noteExprHi;
+        state["note_expr_curve"] = m_noteExprCurve;
 
         // Soundfiles
         nb::dict soundfiles;
@@ -377,6 +419,18 @@ class FaustProcessor : public ProcessorBase
         m_dynamicVoices = nb::cast<bool>(state["dynamic_voices"]);
         m_llvmOptLevel = nb::cast<int>(state["llvm_opt_level"]);
         m_releaseLengthSec = nb::cast<double>(state["release_length"]);
+
+        // Per-note expression (pickle v2; absent in v1 ⇒ stays disabled)
+        if (state.contains("note_expr_enabled"))
+            m_noteExprEnabled = nb::cast<bool>(state["note_expr_enabled"]);
+        if (state.contains("note_expr_param"))
+            m_noteExprParam = nb::cast<std::string>(state["note_expr_param"]);
+        if (state.contains("note_expr_lo"))
+            m_noteExprLo = nb::cast<double>(state["note_expr_lo"]);
+        if (state.contains("note_expr_hi"))
+            m_noteExprHi = nb::cast<double>(state["note_expr_hi"]);
+        if (state.contains("note_expr_curve"))
+            m_noteExprCurve = nb::cast<double>(state["note_expr_curve"]);
 
         // Restore from compiled LLVM bitcode if available (fast path),
         // otherwise fall back to full recompilation from source (slow path).
@@ -538,6 +592,13 @@ class FaustProcessor : public ProcessorBase
     bool m_groupVoices = true;
     int m_llvmOptLevel = -1;
 
+    // Per-note expression (Tier-A, WS16). Default-off ⇒ stock-identical render path.
+    bool m_noteExprEnabled = false;
+    std::string m_noteExprParam;
+    double m_noteExprLo = 0.0;
+    double m_noteExprHi = 1.0;
+    double m_noteExprCurve = 1.0;
+
     MidiBuffer myMidiBufferQN;
     MidiBuffer myMidiBufferSec;
 
@@ -675,6 +736,16 @@ inline void create_bindings_for_faust_processor(nb::module_& m)
         .def("add_midi_note", &FaustProcessor::addMidiNote, arg("note"), arg("velocity"),
              arg("start_time"), arg("duration"), kw_only(), arg("beats") = false,
              add_midi_description)
+        .def("set_note_expression", &FaustProcessor::setNoteExpression, arg("parameter"),
+             kw_only(), arg("lo") = 0.0, arg("hi") = 1.0, arg("curve") = 1.0,
+             "Per-note expression (Tier-A). At every note-on, set the named per-voice "
+             "parameter (matched by path, shortname, or label) to "
+             "lo + (hi - lo) * (velocity/127)**curve, written directly to the voice that "
+             "starts the note. This gives deterministic, genuinely per-voice expression "
+             "(e.g. louder notes brighter) that an offline render otherwise cannot do. "
+             "Pass an empty parameter name, or call clear_note_expression(), to disable.")
+        .def("clear_note_expression", &FaustProcessor::clearNoteExpression,
+             "Disable per-note expression previously set by set_note_expression().")
         .def("save_midi", &FaustProcessor::saveMIDI, arg("filepath"), save_midi_description)
         .def("set_soundfiles", &FaustProcessor::setSoundfiles, arg("soundfile_dict"),
              "Set the audio data that the FaustProcessor can use with the "
