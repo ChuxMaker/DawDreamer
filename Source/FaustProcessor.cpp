@@ -179,7 +179,8 @@ void FaustProcessor::processBlock(juce::AudioSampleBuffer& buffer, juce::MidiBuf
                         MapUI* exprVoice =
                             m_dsp_poly->keyOn(midiChannel, myMidiMessageSec.getNoteNumber(),
                                               myMidiMessageSec.getVelocity());
-                        applyNoteExpression(exprVoice, myMidiMessageSec.getVelocity());
+                        applyNoteExpression(exprVoice, myMidiMessageSec.getVelocity(),
+                                            (long long)start);
                     }
                     else if (myMidiMessageSec.isNoteOff())
                     {
@@ -214,7 +215,8 @@ void FaustProcessor::processBlock(juce::AudioSampleBuffer& buffer, juce::MidiBuf
                         MapUI* exprVoice =
                             m_dsp_poly->keyOn(midiChannel, myMidiMessageQN.getNoteNumber(),
                                               myMidiMessageQN.getVelocity());
-                        applyNoteExpression(exprVoice, myMidiMessageQN.getVelocity());
+                        applyNoteExpression(exprVoice, myMidiMessageQN.getVelocity(),
+                                            (long long)start);
                     }
                     else if (myMidiMessageQN.isNoteOff())
                     {
@@ -234,6 +236,10 @@ void FaustProcessor::processBlock(juce::AudioSampleBuffer& buffer, juce::MidiBuf
             {
                 oneSampleInBuffer.setSample(chan, 0, buffer.getSample(chan, i));
             }
+
+            // per-note expression envelope: modulate each active voice at control rate
+            if (m_noteExprDynamic && (i % kNoteExprStride == 0))
+                updateNoteExpression((long long)start);
 
             m_dsp_poly->compute(1, oneSampReadPtrs, oneSampWritePtrs);
 
@@ -1318,6 +1324,7 @@ void FaustProcessor::clearMidi()
 {
     myMidiBufferSec.clear();
     myMidiBufferQN.clear();
+    m_activeExpr.clear();   // per-note expression state is per-render (warm cache calls this)
 }
 
 bool FaustProcessor::addMidiNote(uint8 midiNote, uint8 midiVelocity, const double noteStart,

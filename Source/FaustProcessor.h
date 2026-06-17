@@ -18,6 +18,7 @@
 
 #include <cmath>
 #include <map>
+#include <unordered_map>
 
 #include "FaustArgvBuilder.h"
 #include "FaustSignalAPI.h"
@@ -239,37 +240,85 @@ class FaustProcessor : public ProcessorBase
     void setReleaseLength(double sec);
 
     // --- Per-note expression (Tier-A, aifi WS16) ---------------------------------
-    // When enabled, a per-voice parameter is set from each note's velocity at
-    // note-on: value = lo + (hi - lo) * (velocity/127)^curve. The value is written
-    // directly to the dsp_voice that keyOn() returns (a MapUI), so it is genuinely
-    // per-note and bypasses the grouped UI. This is the offline, deterministic,
-    // fork-only path the stock wheel cannot do; it supersedes the realize-side
-    // global running-gain "win A" hack. Default-off ⇒ byte-identical to stock.
-    void setNoteExpression(const std::string& param, double lo, double hi, double curve)
+    // A per-voice parameter set from each note's velocity:
+    //   base = lo + (hi - lo) * (velocity/127)^curve
+    // written directly to the dsp_voice that keyOn() returns (a MapUI), so it is
+    // genuinely per-note and bypasses the grouped UI -- the offline, deterministic,
+    // fork-only path the stock wheel cannot do (it supersedes realize's running-gain
+    // "win A" hack). With settle==1 or tau<=0 the value is STATIC (set once at
+    // note-on). With tau>0 and settle!=1 it VARIES over the note's life (the envelope
+    // / "deepen" step), modulated host-side per (control-rate) sample in processBlock:
+    //   value(age) = base * (settle + (1 - settle) * exp(-age/tau))
+    // settle<1 is a brightness DECAY (bright onset, mellows); settle>1 is a SWELL.
+    // Default-off ⇒ byte-identical to stock.
+    struct NoteExprState
+    {
+        double base;
+        long long startSample;
+    };
+    static constexpr int kNoteExprStride = 64;   // control-rate update period (samples)
+
+    void setNoteExpression(const std::string& param, double lo, double hi, double curve,
+                           double settle, double tau)
     {
         m_noteExprParam = param;
         m_noteExprLo = lo;
         m_noteExprHi = hi;
         m_noteExprCurve = (curve > 0.0) ? curve : 1.0;
+        m_noteExprSettle = settle;
+        m_noteExprTau = tau;
         m_noteExprEnabled = !param.empty();
+        m_noteExprDynamic = m_noteExprEnabled && tau > 0.0 && settle != 1.0;
+        m_activeExpr.clear();
     }
 
-    void clearNoteExpression() { m_noteExprEnabled = false; }
-
-    // Apply per-note expression to the voice a keyOn just returned. No-op unless
-    // enabled and voice is non-null. Static per note: set once at note start where
-    // amplitude is ~0 (no click), held constant for the note's duration. Re-asserted
-    // on each keyOn, so voice-stealing reuses get the new note's value.
-    void applyNoteExpression(MapUI* voice, int velocity)
+    void clearNoteExpression()
     {
-        if (!m_noteExprEnabled || voice == nullptr)
-            return;
+        m_noteExprEnabled = false;
+        m_noteExprDynamic = false;
+        m_activeExpr.clear();
+    }
+
+    // base (onset / static) expression value for a note's velocity.
+    double noteExprBase(int velocity) const
+    {
         double norm = double(velocity) / 127.0;
         if (norm < 0.0) norm = 0.0;
         if (norm > 1.0) norm = 1.0;
         double shaped = (m_noteExprCurve == 1.0) ? norm : std::pow(norm, m_noteExprCurve);
-        voice->setParamValue(m_noteExprParam,
-                             FAUSTFLOAT(m_noteExprLo + (m_noteExprHi - m_noteExprLo) * shaped));
+        return m_noteExprLo + (m_noteExprHi - m_noteExprLo) * shaped;
+    }
+
+    // Called at each keyOn with the voice keyOn returned + the absolute sample index.
+    // Sets the onset value immediately (note start, amplitude ~0 -> no click) and, when
+    // the envelope is dynamic, registers the voice so updateNoteExpression() can modulate
+    // it over the note. Keyed by voice pointer (bounded by num_voices; a reused/stolen
+    // voice's entry is overwritten by its next note).
+    void applyNoteExpression(MapUI* voice, int velocity, long long sample)
+    {
+        if (!m_noteExprEnabled || voice == nullptr)
+            return;
+        double base = noteExprBase(velocity);
+        voice->setParamValue(m_noteExprParam, FAUSTFLOAT(base));
+        if (m_noteExprDynamic)
+            m_activeExpr[voice] = NoteExprState{base, sample};
+    }
+
+    // Control-rate update of every active voice's expression param toward its settle
+    // value. Called every kNoteExprStride samples from processBlock (the envelope is slow
+    // vs audio rate, so control-rate stepping is inaudible and keeps render fast).
+    void updateNoteExpression(long long sample)
+    {
+        if (!m_noteExprDynamic || m_activeExpr.empty())
+            return;
+        for (auto& kv : m_activeExpr)
+        {
+            double age = double(sample - kv.second.startSample) / mySampleRate;
+            if (age < 0.0) age = 0.0;
+            double env = m_noteExprSettle +
+                         (1.0 - m_noteExprSettle) * std::exp(-age / m_noteExprTau);
+            kv.first->setParamValue(m_noteExprParam, FAUSTFLOAT(kv.second.base * env));
+        }
     }
 
     nb::dict getPickleState()
@@ -311,6 +360,8 @@ class FaustProcessor : public ProcessorBase
         state["note_expr_lo"] = m_noteExprLo;
         state["note_expr_hi"] = m_noteExprHi;
         state["note_expr_curve"] = m_noteExprCurve;
+        state["note_expr_settle"] = m_noteExprSettle;
+        state["note_expr_tau"] = m_noteExprTau;
 
         // Soundfiles
         nb::dict soundfiles;
@@ -431,6 +482,12 @@ class FaustProcessor : public ProcessorBase
             m_noteExprHi = nb::cast<double>(state["note_expr_hi"]);
         if (state.contains("note_expr_curve"))
             m_noteExprCurve = nb::cast<double>(state["note_expr_curve"]);
+        if (state.contains("note_expr_settle"))
+            m_noteExprSettle = nb::cast<double>(state["note_expr_settle"]);
+        if (state.contains("note_expr_tau"))
+            m_noteExprTau = nb::cast<double>(state["note_expr_tau"]);
+        m_noteExprDynamic =
+            m_noteExprEnabled && m_noteExprTau > 0.0 && m_noteExprSettle != 1.0;
 
         // Restore from compiled LLVM bitcode if available (fast path),
         // otherwise fall back to full recompilation from source (slow path).
@@ -594,10 +651,14 @@ class FaustProcessor : public ProcessorBase
 
     // Per-note expression (Tier-A, WS16). Default-off ⇒ stock-identical render path.
     bool m_noteExprEnabled = false;
+    bool m_noteExprDynamic = false;     // tau>0 && settle!=1 -> modulate over each note
     std::string m_noteExprParam;
     double m_noteExprLo = 0.0;
     double m_noteExprHi = 1.0;
     double m_noteExprCurve = 1.0;
+    double m_noteExprSettle = 1.0;      // asymptote multiplier (<1 decay, >1 swell)
+    double m_noteExprTau = 0.0;         // envelope time constant (seconds); <=0 = static
+    std::unordered_map<MapUI*, NoteExprState> m_activeExpr;   // active voices (<= num_voices)
 
     MidiBuffer myMidiBufferQN;
     MidiBuffer myMidiBufferSec;
@@ -738,11 +799,15 @@ inline void create_bindings_for_faust_processor(nb::module_& m)
              add_midi_description)
         .def("set_note_expression", &FaustProcessor::setNoteExpression, arg("parameter"),
              kw_only(), arg("lo") = 0.0, arg("hi") = 1.0, arg("curve") = 1.0,
+             arg("settle") = 1.0, arg("tau") = 0.0,
              "Per-note expression (Tier-A). At every note-on, set the named per-voice "
-             "parameter (matched by path, shortname, or label) to "
+             "parameter (matched by path, shortname, or label) to a base value "
              "lo + (hi - lo) * (velocity/127)**curve, written directly to the voice that "
-             "starts the note. This gives deterministic, genuinely per-voice expression "
-             "(e.g. louder notes brighter) that an offline render otherwise cannot do. "
+             "starts the note -- deterministic, genuinely per-voice expression (e.g. "
+             "louder notes brighter) an offline render otherwise cannot do. With settle!=1 "
+             "and tau>0 the value also varies over each note's life: "
+             "base * (settle + (1 - settle) * exp(-age_seconds/tau)) -- settle<1 decays "
+             "(bright onset, mellows), settle>1 swells. settle==1 or tau<=0 is static. "
              "Pass an empty parameter name, or call clear_note_expression(), to disable.")
         .def("clear_note_expression", &FaustProcessor::clearNoteExpression,
              "Disable per-note expression previously set by set_note_expression().")
