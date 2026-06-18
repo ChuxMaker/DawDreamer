@@ -374,6 +374,10 @@ void FaustProcessor::reset()
     myRecordedMidiSequence.addEvent(juce::MidiMessage::tempoMetaEvent(500 * 1000));
     myRecordedMidiSequence.addEvent(juce::MidiMessage::midiChannelMetaEvent(1));
 
+    // per-note expression voices are per-render; drop any (stale, possibly
+    // reallocated) voice pointers so each render starts from a clean map.
+    m_activeExpr.clear();
+
     ProcessorBase::reset();
 }
 
