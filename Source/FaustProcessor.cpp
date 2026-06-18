@@ -181,6 +181,8 @@ void FaustProcessor::processBlock(juce::AudioSampleBuffer& buffer, juce::MidiBuf
                                               myMidiMessageSec.getVelocity());
                         applyNoteExpression(exprVoice, myMidiMessageSec.getVelocity(),
                                             (long long)start);
+                        applyNoteBend(exprVoice, myMidiMessageSec.getNoteNumber(),
+                                      (long long)start);
                     }
                     else if (myMidiMessageSec.isNoteOff())
                     {
@@ -217,6 +219,8 @@ void FaustProcessor::processBlock(juce::AudioSampleBuffer& buffer, juce::MidiBuf
                                               myMidiMessageQN.getVelocity());
                         applyNoteExpression(exprVoice, myMidiMessageQN.getVelocity(),
                                             (long long)start);
+                        applyNoteBend(exprVoice, myMidiMessageQN.getNoteNumber(),
+                                      (long long)start);
                     }
                     else if (myMidiMessageQN.isNoteOff())
                     {
@@ -237,9 +241,12 @@ void FaustProcessor::processBlock(juce::AudioSampleBuffer& buffer, juce::MidiBuf
                 oneSampleInBuffer.setSample(chan, 0, buffer.getSample(chan, i));
             }
 
-            // per-note expression envelope: modulate each active voice at control rate
-            if (m_noteExprDynamic && (i % kNoteExprStride == 0))
+            // per-note expression envelope + pitch bend: modulate each active voice at control rate
+            if ((m_noteExprDynamic || m_bendEnabled) && (i % kNoteExprStride == 0))
+            {
                 updateNoteExpression((long long)start);
+                updateNoteBend((long long)start);
+            }
 
             m_dsp_poly->compute(1, oneSampReadPtrs, oneSampWritePtrs);
 
@@ -377,6 +384,7 @@ void FaustProcessor::reset()
     // per-note expression voices are per-render; drop any (stale, possibly
     // reallocated) voice pointers so each render starts from a clean map.
     m_activeExpr.clear();
+    m_activeBend.clear();
 
     ProcessorBase::reset();
 }
@@ -1329,6 +1337,7 @@ void FaustProcessor::clearMidi()
     myMidiBufferSec.clear();
     myMidiBufferQN.clear();
     m_activeExpr.clear();   // per-note expression state is per-render (warm cache calls this)
+    m_activeBend.clear();   // per-note bend state is likewise per-render
 }
 
 bool FaustProcessor::addMidiNote(uint8 midiNote, uint8 midiVelocity, const double noteStart,

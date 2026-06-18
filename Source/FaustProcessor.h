@@ -321,6 +321,115 @@ class FaustProcessor : public ProcessorBase
         }
     }
 
+    // ---- Per-note PITCH BEND (Tier-A, WS18 / ADR 0031 R3) ---------------------------
+    // Each bending note carries its OWN breakpoint curve (t_seconds_from_onset, semitones).
+    // At key-on the curve is matched to the starting note by (pitch, onset) and applied to
+    // that voice's "bend" param at control rate over the note's life; a non-bending note
+    // resets its voice's bend to 0 (so a reused/stolen voice never inherits a prior bend).
+    // Default-off (no curves) ⇒ the "bend" param is never written ⇒ byte-identical render.
+    // The voice DSP multiplies freq by 2^(bend/12); a voice with no "bend" param ignores it.
+    struct NoteBend
+    {
+        int pitch = 0;
+        long long startSample = 0;
+        std::vector<std::pair<double, double>> points;   // (t_sec_from_onset, semitones)
+        bool used = false;
+    };
+    struct ActiveBend
+    {
+        const NoteBend* bend = nullptr;
+        long long startSample = 0;
+    };
+
+    void setNoteBends(nb::list bends)
+    {
+        m_noteBends.clear();
+        m_activeBend.clear();
+        for (auto item : bends)
+        {
+            auto d = nb::cast<nb::dict>(item);
+            NoteBend nbd;
+            nbd.pitch = nb::cast<int>(d["pitch"]);
+            nbd.startSample = (long long)std::llround(nb::cast<double>(d["start"]) * mySampleRate);
+            for (auto pt : nb::cast<nb::list>(d["points"]))
+            {
+                auto pr = nb::cast<nb::list>(pt);
+                nbd.points.emplace_back(nb::cast<double>(pr[0]), nb::cast<double>(pr[1]));
+            }
+            m_noteBends.push_back(std::move(nbd));
+        }
+        m_bendEnabled = !m_noteBends.empty();
+    }
+
+    void clearNoteBends()
+    {
+        m_noteBends.clear();
+        m_activeBend.clear();
+        m_bendEnabled = false;
+    }
+
+    // piecewise-linear interpolation of a bend curve at t seconds from onset (clamped).
+    double bendValueAt(const NoteBend& nbd, double t) const
+    {
+        const auto& p = nbd.points;
+        if (p.empty()) return 0.0;
+        if (t <= p.front().first) return p.front().second;
+        if (t >= p.back().first) return p.back().second;
+        for (size_t k = 1; k < p.size(); ++k)
+        {
+            if (t <= p[k].first)
+            {
+                double t0 = p[k - 1].first, s0 = p[k - 1].second;
+                double t1 = p[k].first, s1 = p[k].second;
+                double a = (t1 > t0) ? (t - t0) / (t1 - t0) : 0.0;
+                return s0 + (s1 - s0) * a;
+            }
+        }
+        return p.back().second;
+    }
+
+    // at key-on: match this note to its bend curve (nearest unused same-pitch within a
+    // 50 ms onset tolerance) and set the onset bend; a non-matching note resets bend to 0.
+    void applyNoteBend(MapUI* voice, int pitch, long long sample)
+    {
+        if (!m_bendEnabled || voice == nullptr)
+            return;
+        NoteBend* match = nullptr;
+        long long best = -1;
+        const long long tol = (long long)(mySampleRate * 0.05);
+        for (auto& nbd : m_noteBends)
+        {
+            if (nbd.used || nbd.pitch != pitch)
+                continue;
+            long long d = nbd.startSample - sample;
+            if (d < 0) d = -d;
+            if (d <= tol && (best < 0 || d < best)) { best = d; match = &nbd; }
+        }
+        if (match == nullptr)
+        {
+            voice->setParamValue(m_bendParam, FAUSTFLOAT(0.0));   // reset a reused voice
+            m_activeBend.erase(voice);
+            return;
+        }
+        match->used = true;
+        voice->setParamValue(m_bendParam, FAUSTFLOAT(bendValueAt(*match, 0.0)));
+        m_activeBend[voice] = ActiveBend{match, sample};
+    }
+
+    // control-rate update of every active bend voice (called from processBlock alongside
+    // the note-expression envelope update).
+    void updateNoteBend(long long sample)
+    {
+        if (!m_bendEnabled || m_activeBend.empty())
+            return;
+        for (auto& kv : m_activeBend)
+        {
+            double t = double(sample - kv.second.startSample) / mySampleRate;
+            if (t < 0.0) t = 0.0;
+            kv.first->setParamValue(m_bendParam, FAUSTFLOAT(bendValueAt(*kv.second.bend, t)));
+        }
+    }
+
     nb::dict getPickleState()
     {
         nb::dict state;
@@ -660,6 +769,12 @@ class FaustProcessor : public ProcessorBase
     double m_noteExprTau = 0.0;         // envelope time constant (seconds); <=0 = static
     std::unordered_map<MapUI*, NoteExprState> m_activeExpr;   // active voices (<= num_voices)
 
+    // Per-note pitch bend (WS18 / ADR 0031 R3). Default-off ⇒ byte-identical render path.
+    bool m_bendEnabled = false;
+    std::string m_bendParam = "bend";
+    std::vector<NoteBend> m_noteBends;
+    std::unordered_map<MapUI*, ActiveBend> m_activeBend;
+
     MidiBuffer myMidiBufferQN;
     MidiBuffer myMidiBufferSec;
 
@@ -811,6 +926,15 @@ inline void create_bindings_for_faust_processor(nb::module_& m)
              "Pass an empty parameter name, or call clear_note_expression(), to disable.")
         .def("clear_note_expression", &FaustProcessor::clearNoteExpression,
              "Disable per-note expression previously set by set_note_expression().")
+        .def("set_note_bends", &FaustProcessor::setNoteBends, arg("bends"),
+             "Per-note pitch bend (WS18). `bends` is a list of {'pitch': int, 'start': "
+             "seconds, 'points': [[t_seconds_from_onset, semitones], ...]}. At each note-on "
+             "the curve is matched to the starting note by (pitch, onset) and written to that "
+             "voice's 'bend' param at control rate (piecewise-linear, clamped); notes without "
+             "an entry set bend=0. The voice DSP must expose a 'bend' hslider (freq*2^(bend/12)). "
+             "Per-render: re-set each render. Pass [] or call clear_note_bends() to disable.")
+        .def("clear_note_bends", &FaustProcessor::clearNoteBends,
+             "Disable per-note pitch bend previously set by set_note_bends().")
         .def("save_midi", &FaustProcessor::saveMIDI, arg("filepath"), save_midi_description)
         .def("set_soundfiles", &FaustProcessor::setSoundfiles, arg("soundfile_dict"),
              "Set the audio data that the FaustProcessor can use with the "
