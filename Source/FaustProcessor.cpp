@@ -2,6 +2,8 @@
 
 #ifdef BUILD_DAWDREAMER_FAUST
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <mutex>
@@ -158,15 +160,45 @@ void FaustProcessor::processBlock(juce::AudioSampleBuffer& buffer, juce::MidiBuf
         auto pulseStart = std::floor(*posInfo->getPpqPosition() * PPQN);
         auto pulseStep = (*posInfo->getBpm() * PPQN) / (mySampleRate * 60.);
 
-        // render one sample at a time because we want accurate timing of
-        // keyOn/keyOff.
+        // Render in BLOCKS, cut at the MIDI events (and at the control-rate stride), so keyOn/keyOff
+        // still land on their exact sample -- but m_dsp_poly->compute() receives a REAL BLOCK.
+        //
+        // This used to call compute(1, ...) once per sample. Faust's poly engine frees a RELEASED
+        // voice when its level falls below VOICE_STOP_LEVEL (-90 dB), and it computes that level as
+        //     fLevel = sqrt(sumSquares / (count * numOutputs))
+        // With count == 1 that is not an RMS -- it is the value of a SINGLE SAMPLE. And every
+        // periodic waveform passes through zero. So a releasing voice was killed the first time its
+        // waveform crossed near zero, at full volume, mid-tail.
+        //
+        // Measured (aifi, 2026-07-13), authored release 1.3 s, note-off at t = 1.000 s:
+        //     sawtooth   died at 1.137 s   (still sounding at -9.6 dBFS)
+        //     sine       died at 1.246 s
+        //     square     rang to 2.298 s   <- a square NEVER approaches zero, so it survived
+        //     square+DC  died at 1.001 s   <- it sits AT zero half of every cycle: killed instantly
+        // The square wave surviving its full release is the proof: the bug is the zero crossing, and
+        // the cause is the one-sample compute. Every Faust note ever rendered through this host had
+        // its release amputated at a point determined by its waveform and phase.
+        //
+        // `release_length` cannot fix it: setReleaseLength was removed in Faust 2.81.10 and the setter
+        // is commented out in five places here -- it is a dead knob. `dynamic_voices = false` cannot
+        // fix it either: it skips the level check but never returns a voice to the free pool, so the
+        // engine steals voices out of their tails and the render loses determinism.
+        //
+        // Blocks also make this far cheaper: a per-sample compute pays the poly-engine's whole
+        // per-call overhead 44,100 times a second.
+        const int numSamples = buffer.getNumSamples();
 
-        auto oneSampReadPtrs = (float**)oneSampleInBuffer.getArrayOfReadPointers();
-        auto oneSampWritePtrs = (float**)oneSampleOutBuffer.getArrayOfWritePointers();
+        if (chunkInBuffer.getNumSamples() < numSamples)
+            chunkInBuffer.setSize(std::max(1, m_numInputChannels), numSamples, false, true, true);
+        if (chunkOutBuffer.getNumSamples() < numSamples)
+            chunkOutBuffer.setSize(std::max(1, m_numOutputChannels), numSamples, false, true, true);
+
+        auto chunkReadPtrs = (float**)chunkInBuffer.getArrayOfReadPointers();
+        auto chunkWritePtrs = (float**)chunkOutBuffer.getArrayOfWritePointers();
         const int midiChannel = 0;
         int chan = 0;
 
-        for (int i = 0; i < buffer.getNumSamples(); i++)
+        for (int i = 0; i < numSamples; /* i advances by the chunk length, below */)
         {
             {
                 myIsMessageBetweenSec =
@@ -245,27 +277,52 @@ void FaustProcessor::processBlock(juce::AudioSampleBuffer& buffer, juce::MidiBuf
                 }
             }
 
-            for (chan = 0; chan < m_numInputChannels; chan++)
-            {
-                oneSampleInBuffer.setSample(chan, 0, buffer.getSample(chan, i));
-            }
-
-            // per-note expression envelope + pitch bend: modulate each active voice at control rate
-            if ((m_noteExprDynamic || m_bendEnabled) && (i % kNoteExprStride == 0))
+            // per-note expression envelope + pitch bend: modulate each active voice at control rate.
+            // The chunk length below is clamped to the stride, so `i` always lands on a stride boundary
+            // while expression is live -- the control rate is unchanged from the per-sample loop.
+            const bool exprLive = (m_noteExprDynamic || m_bendEnabled);
+            if (exprLive && (i % kNoteExprStride == 0))
             {
                 updateNoteExpression((long long)start);
                 updateNoteBend((long long)start);
             }
 
-            m_dsp_poly->compute(1, oneSampReadPtrs, oneSampWritePtrs);
+            // How many samples may we compute in ONE call? Up to the next thing that must happen on an
+            // exact sample: the next MIDI event (either clock), or the next control-rate boundary.
+            int n = numSamples - i;
+
+            if (myMidiEventsDoRemainSec)
+            {
+                const int d = (int)std::floor(myMidiMessagePositionSec - start);
+                if (d > 0 && d < n) n = d;               // stop ON the event's sample
+            }
+            if (myMidiEventsDoRemainQN && pulseStep > 0.0)
+            {
+                const int d = (int)std::floor((myMidiMessagePositionQN - pulseStart) / pulseStep);
+                if (d > 0 && d < n) n = d;
+            }
+            if (exprLive)
+            {
+                const int d = kNoteExprStride - (i % kNoteExprStride);
+                if (d > 0 && d < n) n = d;
+            }
+            if (n < 1) n = 1;
+
+            for (chan = 0; chan < m_numInputChannels; chan++)
+            {
+                chunkInBuffer.copyFrom(chan, 0, buffer, chan, i, n);
+            }
+
+            m_dsp_poly->compute(n, chunkReadPtrs, chunkWritePtrs);
 
             for (chan = 0; chan < m_numOutputChannels; chan++)
             {
-                buffer.setSample(chan, i, oneSampleOutBuffer.getSample(chan, 0));
+                buffer.copyFrom(chan, i, chunkOutBuffer, chan, 0, n);
             }
 
-            start += 1;
-            pulseStart += pulseStep;
+            i += n;
+            start += n;
+            pulseStart += pulseStep * n;
         }
     }
     else
@@ -657,8 +714,9 @@ bool FaustProcessor::initFromFactory()
             m_midi_handler = rt_midi("my_midi");
             m_midi_handler.addMidiIn(m_dsp_poly);
 
-            oneSampleInBuffer.setSize(m_numInputChannels, 1);
-            oneSampleOutBuffer.setSize(m_numOutputChannels, 1);
+            // nominal; processBlock grows these to the host's block size on the first call
+            chunkInBuffer.setSize(std::max(1, m_numInputChannels), 1);
+            chunkOutBuffer.setSize(std::max(1, m_numOutputChannels), 1);
         }
 
         m_ui = new APIUI();
@@ -765,8 +823,9 @@ bool FaustProcessor::compileSignals(std::vector<SigWrapper>& wrappers)
         m_midi_handler = rt_midi("my_midi");
         m_midi_handler.addMidiIn(m_dsp_poly);
 
-        oneSampleInBuffer.setSize(m_numInputChannels, 1);
-        oneSampleOutBuffer.setSize(m_numOutputChannels, 1);
+        // nominal; processBlock grows these to the host's block size on the first call
+        chunkInBuffer.setSize(std::max(1, m_numInputChannels), 1);
+        chunkOutBuffer.setSize(std::max(1, m_numOutputChannels), 1);
     }
 
     m_ui = new APIUI();
@@ -861,8 +920,9 @@ bool FaustProcessor::compileSignals(std::vector<SigWrapper>& wrappers,
         m_midi_handler = rt_midi("my_midi");
         m_midi_handler.addMidiIn(m_dsp_poly);
 
-        oneSampleInBuffer.setSize(m_numInputChannels, 1);
-        oneSampleOutBuffer.setSize(m_numOutputChannels, 1);
+        // nominal; processBlock grows these to the host's block size on the first call
+        chunkInBuffer.setSize(std::max(1, m_numInputChannels), 1);
+        chunkOutBuffer.setSize(std::max(1, m_numOutputChannels), 1);
     }
 
     m_ui = new APIUI();
@@ -946,8 +1006,9 @@ bool FaustProcessor::compileBox(BoxWrapper& box)
         m_midi_handler = rt_midi("my_midi");
         m_midi_handler.addMidiIn(m_dsp_poly);
 
-        oneSampleInBuffer.setSize(m_numInputChannels, 1);
-        oneSampleOutBuffer.setSize(m_numOutputChannels, 1);
+        // nominal; processBlock grows these to the host's block size on the first call
+        chunkInBuffer.setSize(std::max(1, m_numInputChannels), 1);
+        chunkOutBuffer.setSize(std::max(1, m_numOutputChannels), 1);
     }
 
     m_ui = new APIUI();
@@ -1032,8 +1093,9 @@ bool FaustProcessor::compileBox(BoxWrapper& box, const std::vector<std::string>&
         m_midi_handler = rt_midi("my_midi");
         m_midi_handler.addMidiIn(m_dsp_poly);
 
-        oneSampleInBuffer.setSize(m_numInputChannels, 1);
-        oneSampleOutBuffer.setSize(m_numOutputChannels, 1);
+        // nominal; processBlock grows these to the host's block size on the first call
+        chunkInBuffer.setSize(std::max(1, m_numInputChannels), 1);
+        chunkOutBuffer.setSize(std::max(1, m_numOutputChannels), 1);
     }
 
     m_ui = new APIUI();
