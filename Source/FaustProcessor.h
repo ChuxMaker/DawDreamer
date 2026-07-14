@@ -795,8 +795,15 @@ class FaustProcessor : public ProcessorBase
     bool myMidiEventsDoRemainQN = false;
     bool myMidiEventsDoRemainSec = false;
 
-    juce::AudioSampleBuffer oneSampleInBuffer;
-    juce::AudioSampleBuffer oneSampleOutBuffer;
+    // Scratch for the BLOCK-BETWEEN-MIDI-EVENTS render (see processBlock). These were one sample
+    // wide, because processBlock called m_dsp_poly->compute(1, ...) per sample. That is what broke
+    // the note RELEASE: Faust's poly engine frees a released voice when its level drops below
+    // VOICE_STOP_LEVEL (-90 dB), and it computes that level as
+    //     sqrt(sumSquares / (count * numOutputs))
+    // -- so with count == 1 it is not an RMS at all, it is the value of ONE SAMPLE. A releasing
+    // voice was therefore killed the first time its waveform passed near zero.
+    juce::AudioSampleBuffer chunkInBuffer;
+    juce::AudioSampleBuffer chunkOutBuffer;
 
     std::map<int, int> m_map_juceIndex_to_faustIndex;
     std::map<int, std::string> m_map_juceIndex_to_parAddress;
