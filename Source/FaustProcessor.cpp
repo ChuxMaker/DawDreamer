@@ -805,6 +805,7 @@ bool FaustProcessor::compileSignals(std::vector<SigWrapper>& wrappers)
         // Allocate polyphonic DSP
         m_dsp_poly = new mydsp_poly(m_dsp, m_nvoices, m_dynamicVoices, m_groupVoices);
         // m_dsp_poly->setReleaseLength(m_releaseLengthSec); // Removed in Faust 2.81.10
+        applyVelPower();
         theDsp = m_dsp_poly;
     }
 
@@ -902,6 +903,7 @@ bool FaustProcessor::compileSignals(std::vector<SigWrapper>& wrappers,
         // Allocate polyphonic DSP
         m_dsp_poly = new mydsp_poly(m_dsp, m_nvoices, m_dynamicVoices, m_groupVoices);
         // m_dsp_poly->setReleaseLength(m_releaseLengthSec); // Removed in Faust 2.81.10
+        applyVelPower();
         theDsp = m_dsp_poly;
     }
 
@@ -988,6 +990,7 @@ bool FaustProcessor::compileBox(BoxWrapper& box)
         // Allocate polyphonic DSP
         m_dsp_poly = new mydsp_poly(m_dsp, m_nvoices, m_dynamicVoices, m_groupVoices);
         // m_dsp_poly->setReleaseLength(m_releaseLengthSec); // Removed in Faust 2.81.10
+        applyVelPower();
         theDsp = m_dsp_poly;
     }
 
@@ -1075,6 +1078,7 @@ bool FaustProcessor::compileBox(BoxWrapper& box, const std::vector<std::string>&
         // Allocate polyphonic DSP
         m_dsp_poly = new mydsp_poly(m_dsp, m_nvoices, m_dynamicVoices, m_groupVoices);
         // m_dsp_poly->setReleaseLength(m_releaseLengthSec); // Removed in Faust 2.81.10
+        applyVelPower();
         theDsp = m_dsp_poly;
     }
 
@@ -1582,6 +1586,53 @@ void FaustProcessor::setReleaseLength(double sec)
     if (m_dsp_poly)
     {
         // m_dsp_poly->setReleaseLength(m_releaseLengthSec); // Removed in Faust 2.81.10
+    }
+}
+
+double FaustProcessor::getVelPower()
+{
+    return m_velPower;
+}
+
+void FaustProcessor::setVelPower(double power)
+{
+    if (power <= 0.)
+    {
+        throw std::runtime_error("vel_power must be > 0.");
+    }
+    m_velPower = power;
+    applyVelPower();
+}
+
+void FaustProcessor::applyVelPower()
+{
+    // Voices exist only after a poly compile; each compile site calls this again, so a
+    // vel_power set before set_dsp_string still lands. 1.0 leaves the voices' stock
+    // fVelFun untouched (byte-identical to upstream).
+    if (!m_dsp_poly || m_velPower == 1.0)
+    {
+        return;
+    }
+    const double p = m_velPower;
+    auto* poly = static_cast<mydsp_poly*>(m_dsp_poly);
+    for (auto* voice : poly->fVoiceTable)
+    {
+        bool drivesGain = false;
+        for (const auto& path : voice->fGainPath)
+        {
+            // only the '/gain' convention takes the normalized curve; a '/vel|/velocity'
+            // slider receives RAW velocity for the DSP to shape itself (faust convention)
+            if (path.size() >= 5 && path.compare(path.size() - 5, 5, "/gain") == 0)
+            {
+                drivesGain = true;
+                break;
+            }
+        }
+        if (drivesGain)
+        {
+            voice->fVelFun = [p](int velocity)
+            { return std::pow(double(velocity) / 127.0, p); };
+        }
     }
 }
 
