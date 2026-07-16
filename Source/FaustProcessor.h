@@ -239,6 +239,17 @@ class FaustProcessor : public ProcessorBase
 
     void setReleaseLength(double sec);
 
+    // --- Velocity->gain curve (aifi 2026-07-16) ------------------------------------
+    // Faust's poly architecture maps a '/gain'-slider voice's velocity LINEARLY
+    // (gain = vel/127, ~18 dB across the MIDI range) while acoustic instruments and
+    // deep-sampled libraries span ~36 dB (amplitude ~ vel^2, the DLS convention).
+    // vel_power sets gain = (vel/127)^p for '/gain' voices. A '/vel|/velocity'-named
+    // slider keeps receiving RAW velocity (the faust convention for a DSP that shapes
+    // its own response). Default 1.0 = stock faust behavior, byte-identical.
+    double getVelPower();
+
+    void setVelPower(double power);
+
     // --- Per-note expression (Tier-A, aifi WS16) ---------------------------------
     // A per-voice parameter set from each note's velocity:
     //   base = lo + (hi - lo) * (velocity/127)^curve
@@ -462,6 +473,7 @@ class FaustProcessor : public ProcessorBase
         state["dynamic_voices"] = m_dynamicVoices;
         state["llvm_opt_level"] = m_llvmOptLevel;
         state["release_length"] = m_releaseLengthSec;
+        state["vel_power"] = m_velPower;
 
         // Per-note expression (pickle v2)
         state["note_expr_enabled"] = m_noteExprEnabled;
@@ -579,6 +591,8 @@ class FaustProcessor : public ProcessorBase
         m_dynamicVoices = nb::cast<bool>(state["dynamic_voices"]);
         m_llvmOptLevel = nb::cast<int>(state["llvm_opt_level"]);
         m_releaseLengthSec = nb::cast<double>(state["release_length"]);
+        if (state.contains("vel_power"))   // absent in older pickles ⇒ stock linear
+            m_velPower = nb::cast<double>(state["vel_power"]);
 
         // Per-note expression (pickle v2; absent in v1 ⇒ stays disabled)
         if (state.contains("note_expr_enabled"))
@@ -746,6 +760,9 @@ class FaustProcessor : public ProcessorBase
     int m_numOutputChannels = 0;
 
     double m_releaseLengthSec = 0.5;
+    double m_velPower = 1.0;
+
+    void applyVelPower();
 
     std::string m_autoImport;
     std::string m_code;
@@ -887,6 +904,13 @@ inline void create_bindings_for_faust_processor(nb::module_& m)
                      &FaustProcessor::setReleaseLength,
                      "If using polyphony, specifying the release length accurately can "
                      "help avoid warnings about voices being stolen.")
+        .def_prop_rw("vel_power", &FaustProcessor::getVelPower,
+                     &FaustProcessor::setVelPower,
+                     "MIDI velocity -> gain exponent for polyphonic '/gain' voices: "
+                     "gain = (velocity/127)^p. 1.0 (default) is faust's stock linear "
+                     "mapping (~18 dB across the MIDI range); 2.0 matches acoustic "
+                     "dynamics (~36 dB, the DLS convention). A '/vel' or '/velocity' "
+                     "slider keeps receiving raw velocity regardless.")
         .def_prop_rw("faust_libraries_path", &FaustProcessor::getFaustLibrariesPath,
                      &FaustProcessor::setFaustLibrariesPath,
                      "Absolute path to directory containing your custom "
