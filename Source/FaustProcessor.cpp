@@ -671,6 +671,7 @@ bool FaustProcessor::initFromFactory()
                 throw std::runtime_error(
                     "FaustProcessor::initFromFactory(): Cannot create Poly DSP instance.");
             }
+            applyVelPower();
         }
         else
         {
@@ -1614,7 +1615,22 @@ void FaustProcessor::applyVelPower()
         return;
     }
     const double p = m_velPower;
-    auto* poly = static_cast<mydsp_poly*>(m_dsp_poly);
+    // The factory path (setDSPString -> initFromFactory) hands back a dsp_poly_effect
+    // WRAPPING the mydsp_poly; the direct paths construct mydsp_poly itself. Unwrap,
+    // and fail LOUD on an unknown shape — a silent return here would render every
+    // composed dynamic on the stock linear curve while claiming vel_power was set.
+    dsp_poly* target = m_dsp_poly;
+    if (auto* eff = dynamic_cast<dsp_poly_effect*>(target))
+    {
+        target = eff->getPolyDSP();
+    }
+    auto* poly = dynamic_cast<mydsp_poly*>(target);
+    if (!poly)
+    {
+        throw std::runtime_error(
+            "FaustProcessor::applyVelPower: poly DSP is neither mydsp_poly nor a "
+            "dsp_poly_effect wrapping one — vel_power cannot be applied.");
+    }
     for (auto* voice : poly->fVoiceTable)
     {
         bool drivesGain = false;
