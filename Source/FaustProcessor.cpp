@@ -390,6 +390,31 @@ void FaustProcessor::reset()
     if (m_dsp_poly)
     {
         m_dsp_poly->instanceClear();
+        // aifi (2026-07-17): instanceClear zeroes DSP state, NOT control values — a voice
+        // finishes a bend render holding its final bend on the voice param, and NoteBend::used
+        // flags survive into the next render (a re-render without a fresh set_note_bends would
+        // silently play every bend as 0; a bendless render on a warm engine could inherit stale
+        // detune). Reset the flags, the active map, and every poly voice's bend param.
+        m_activeBend.clear();
+        for (auto& nbd : m_noteBends)
+        {
+            nbd.used = false;
+        }
+        if (m_bendEverSet)   // only an engine that ever bent can hold stale voice bend params (and only its DSP has the slider)
+        {
+            dsp_poly* bt = m_dsp_poly;
+            if (auto* eff = dynamic_cast<dsp_poly_effect*>(bt))
+            {
+                bt = eff->getPolyDSP();
+            }
+            if (auto* poly = dynamic_cast<mydsp_poly*>(bt))
+            {
+                for (auto* voice : poly->fVoiceTable)
+                {
+                    voice->setParamValue(m_bendParam, FAUSTFLOAT(0.0));
+                }
+            }
+        }
     }
 
     COMPILE_FAUST
@@ -1617,6 +1642,7 @@ void FaustProcessor::applyVelPower()
     for (auto* voice : poly->fVoiceTable)
     {
         bool drivesGain = false;
+        bool drivesVel = false;
         for (const auto& path : voice->fGainPath)
         {
             // only the '/gain' convention takes the normalized curve; a '/vel|/velocity'
@@ -1624,8 +1650,23 @@ void FaustProcessor::applyVelPower()
             if (path.size() >= 5 && path.compare(path.size() - 5, 5, "/gain") == 0)
             {
                 drivesGain = true;
-                break;
             }
+            else if ((path.size() >= 4 && path.compare(path.size() - 4, 4, "/vel") == 0) ||
+                     (path.size() >= 9 && path.compare(path.size() - 9, 9, "/velocity") == 0))
+            {
+                drivesVel = true;
+            }
+        }
+        if (drivesGain && drivesVel)
+        {
+            // aifi (2026-07-17): stock extractPaths funnels '/gain' AND '/vel|/velocity' into ONE
+            // fGainPath driven by ONE fVelFun — a hybrid voice would get the pow curve on its
+            // raw-velocity slider ([0,1]^p where the DSP expects 0..127 ≈ silence). No shipped
+            // voice declares both; the first that does must fail LOUD, not render wrong.
+            throw std::runtime_error(
+                "FaustProcessor::applyVelPower: a voice declares BOTH a '/gain' and a "
+                "'/vel|/velocity' slider — they share one velocity function, so the raw-velocity "
+                "slider would silently receive the normalized pow curve. Rename one of the two.");
         }
         if (drivesGain)
         {

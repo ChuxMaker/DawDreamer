@@ -370,6 +370,7 @@ class FaustProcessor : public ProcessorBase
             m_noteBends.push_back(std::move(nbd));
         }
         m_bendEnabled = !m_noteBends.empty();
+        m_bendEverSet = m_bendEverSet || m_bendEnabled;   // aifi: reset() clears voice bend params only on engines that ever bent (a bendless voice has no 'bend' slider — writing it logs errors)
     }
 
     void clearNoteBends()
@@ -788,6 +789,7 @@ class FaustProcessor : public ProcessorBase
 
     // Per-note pitch bend (WS18 / ADR 0031 R3). Default-off ⇒ byte-identical render path.
     bool m_bendEnabled = false;
+    bool m_bendEverSet = false;   // aifi (2026-07-17): true once set_note_bends ever armed this engine — gates reset()'s per-voice bend-param zeroing
     std::string m_bendParam = "bend";
     std::vector<NoteBend> m_noteBends;
     std::unordered_map<MapUI*, ActiveBend> m_activeBend;
