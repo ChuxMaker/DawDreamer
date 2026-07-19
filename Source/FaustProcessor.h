@@ -201,6 +201,14 @@ class FaustProcessor : public ProcessorBase
     void clear();
     bool compile();
     bool compileFromBitcode(const std::string& bitcode);
+
+    // --- Machine-code factory cache (aifi Track 2; vendor/dawdreamer/
+    // machine-code-cache.md). Persist the compiled factory as native object code
+    // and reload it with NO LLVM codegen - the only cross-process byte-
+    // deterministic (and recompile-free) cold path. Poly-aware: the poly factory
+    // writes <path>_machine_process.o / <path>_machine_effect.o.
+    void writeMachineCode(const std::string& path);
+    bool compileFromMachineCode(const std::string& path);
     bool initFromFactory();
     bool setDSPString(const std::string& code);
     bool setDSPFile(const std::string& path);
@@ -892,6 +900,17 @@ inline void create_bindings_for_faust_processor(nb::module_& m)
              "Restore a compiled FAUST object from LLVM bitcode, avoiding "
              "recompilation from source. Bitcode can be obtained from the "
              "processor's pickle state dict.")
+        .def("write_machine_code", &FaustProcessor::writeMachineCode, arg("path"),
+             "Write the compiled factory to native object code (poly: "
+             "<path>_machine_process.o / <path>_machine_effect.o). Reloading it "
+             "skips LLVM codegen entirely, so renders are byte-identical across "
+             "processes.")
+        .def("compile_from_machine_code", &FaustProcessor::compileFromMachineCode,
+             arg("path"),
+             "Restore a factory from object code written by write_machine_code "
+             "(no recompile, no codegen). Set num_voices BEFORE calling so the "
+             "poly/mono path matches the saved factory; the machine target must "
+             "match the writing machine.")
         .def_prop_rw("auto_import", &FaustProcessor::getAutoImport, &FaustProcessor::setAutoImport,
                      "The auto import string. Default is `import(\"stdfaust.lib\");`")
         .def("get_parameters_description", &FaustProcessor::getPluginParametersDescription,
