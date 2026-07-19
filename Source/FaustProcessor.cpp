@@ -708,6 +708,7 @@ bool FaustProcessor::initFromFactory()
                     "FaustProcessor::initFromFactory(): Cannot create Poly DSP instance.");
             }
             applyVelPower();
+            applyVelCouplings();
         }
         else
         {
@@ -843,6 +844,7 @@ bool FaustProcessor::compileSignals(std::vector<SigWrapper>& wrappers)
         m_dsp_poly = new mydsp_poly(m_dsp, m_nvoices, m_dynamicVoices, m_groupVoices);
         // m_dsp_poly->setReleaseLength(m_releaseLengthSec); // Removed in Faust 2.81.10
         applyVelPower();
+        applyVelCouplings();
         theDsp = m_dsp_poly;
     }
 
@@ -941,6 +943,7 @@ bool FaustProcessor::compileSignals(std::vector<SigWrapper>& wrappers,
         m_dsp_poly = new mydsp_poly(m_dsp, m_nvoices, m_dynamicVoices, m_groupVoices);
         // m_dsp_poly->setReleaseLength(m_releaseLengthSec); // Removed in Faust 2.81.10
         applyVelPower();
+        applyVelCouplings();
         theDsp = m_dsp_poly;
     }
 
@@ -1028,6 +1031,7 @@ bool FaustProcessor::compileBox(BoxWrapper& box)
         m_dsp_poly = new mydsp_poly(m_dsp, m_nvoices, m_dynamicVoices, m_groupVoices);
         // m_dsp_poly->setReleaseLength(m_releaseLengthSec); // Removed in Faust 2.81.10
         applyVelPower();
+        applyVelCouplings();
         theDsp = m_dsp_poly;
     }
 
@@ -1116,6 +1120,7 @@ bool FaustProcessor::compileBox(BoxWrapper& box, const std::vector<std::string>&
         m_dsp_poly = new mydsp_poly(m_dsp, m_nvoices, m_dynamicVoices, m_groupVoices);
         // m_dsp_poly->setReleaseLength(m_releaseLengthSec); // Removed in Faust 2.81.10
         applyVelPower();
+        applyVelCouplings();
         theDsp = m_dsp_poly;
     }
 
@@ -1728,6 +1733,86 @@ void FaustProcessor::applyVelPower()
             voice->fVelFun = [p](int velocity)
             { return std::pow(double(velocity) / 127.0, p); };
         }
+    }
+}
+
+void FaustProcessor::setVelCoupling(const std::string& param, double lo, double hi,
+                                    double curve)
+{
+    if (param.empty())
+    {
+        throw std::runtime_error("FaustProcessor::setVelCoupling: parameter must not be empty.");
+    }
+    if (!(curve > 0.0))
+    {
+        throw std::runtime_error("FaustProcessor::setVelCoupling: curve must be > 0.");
+    }
+    for (auto& coupling : m_velCouplings)
+    {
+        if (coupling.fPath == param)
+        {
+            // re-configuring an existing coupling is idempotent, never a duplicate
+            coupling.fLo = lo;
+            coupling.fHi = hi;
+            coupling.fCurve = curve;
+            applyVelCouplings();
+            return;
+        }
+    }
+    m_velCouplings.push_back(dsp_voice::VelCoupling{param, lo, hi, curve});
+    applyVelCouplings();
+}
+
+void FaustProcessor::clearVelCouplings()
+{
+    m_velCouplings.clear();
+    applyVelCouplings();
+}
+
+void FaustProcessor::applyVelCouplings()
+{
+    // Mirror applyVelPower: voices exist only after a poly compile; every compile
+    // site re-applies, so a coupling set before set_dsp_string still lands. An
+    // empty list still SYNCS (clears) the voices' coupling tables.
+    if (!m_dsp_poly)
+    {
+        return;
+    }
+    dsp_poly* target = m_dsp_poly;
+    if (auto* eff = dynamic_cast<dsp_poly_effect*>(target))
+    {
+        target = eff->getPolyDSP();
+    }
+    auto* poly = dynamic_cast<mydsp_poly*>(target);
+    if (!poly)
+    {
+        throw std::runtime_error(
+            "FaustProcessor::applyVelCouplings: poly DSP is neither mydsp_poly nor a "
+            "dsp_poly_effect wrapping one - velocity couplings cannot be applied.");
+    }
+    // FAIL LOUD on a coupling no voice parameter matches: MapUI::setParamValue would
+    // otherwise print one stderr line per keyOn and silently no-op the coupling.
+    for (const auto& coupling : m_velCouplings)
+    {
+        if (!poly->fVoiceTable.empty())
+        {
+            auto* v0 = poly->fVoiceTable[0];
+            bool found = v0->getFullpathMap().count(coupling.fPath) > 0 ||
+                         v0->getShortnameMap().count(coupling.fPath) > 0 ||
+                         v0->getLabelMap().count(coupling.fPath) > 0;
+            if (!found)
+            {
+                throw std::runtime_error(
+                    "FaustProcessor::applyVelCouplings: no voice parameter matches '" +
+                    coupling.fPath +
+                    "' (full path, shortname, or label) - the coupling would silently "
+                    "no-op. Fix the parameter name or remove the coupling.");
+            }
+        }
+    }
+    for (auto* voice : poly->fVoiceTable)
+    {
+        voice->fVelCouplings = m_velCouplings;
     }
 }
 

@@ -253,6 +253,15 @@ class FaustProcessor : public ProcessorBase
 
     void setVelPower(double power);
 
+    // --- Velocity->timbre couplings (aifi Track 2) ------------------------------
+    // param = lo + (hi - lo) * (velocity/127)^curve, written to each voice INSIDE
+    // dsp_voice::keyOn (fork faust patch: dsp_voice::fVelCouplings), so the
+    // internal legato replay (keyOn(fNextNote, fNextVel)) and stolen-voice
+    // restarts - which the host-side note-expression path never sees - get the
+    // coupling too. Several couplings may target different parameters.
+    void setVelCoupling(const std::string& param, double lo, double hi, double curve);
+    void clearVelCouplings();
+
     // --- Per-note expression (Tier-A, aifi WS16) ---------------------------------
     // A per-voice parameter set from each note's velocity:
     //   base = lo + (hi - lo) * (velocity/127)^curve
@@ -769,6 +778,10 @@ class FaustProcessor : public ProcessorBase
 
     void applyVelPower();
 
+    std::vector<dsp_voice::VelCoupling> m_velCouplings;
+
+    void applyVelCouplings();
+
     std::string m_autoImport;
     std::string m_code;
     std::vector<std::string> m_faustLibrariesPaths;
@@ -925,6 +938,16 @@ inline void create_bindings_for_faust_processor(nb::module_& m)
                      "mapping (~18 dB across the MIDI range); 2.0 matches acoustic "
                      "dynamics (~36 dB, the DLS convention). A '/vel' or '/velocity' "
                      "slider keeps receiving raw velocity regardless.")
+        .def("set_vel_coupling", &FaustProcessor::setVelCoupling, arg("parameter"),
+             arg("lo"), arg("hi"), arg("curve") = 1.0,
+             "Couple MIDI velocity to a voice parameter at every key-on: "
+             "`parameter` is set to lo + (hi - lo) * (velocity/127)^curve inside "
+             "the Faust voice allocator, so legato transitions and stolen-voice "
+             "restarts are covered. Call once per parameter to couple several. "
+             "Polyphonic only; validated LOUD against the voice parameter maps "
+             "when applied.")
+        .def("clear_vel_couplings", &FaustProcessor::clearVelCouplings,
+             "Remove every velocity->parameter coupling set by set_vel_coupling().")
         .def_prop_rw("faust_libraries_path", &FaustProcessor::getFaustLibrariesPath,
                      &FaustProcessor::setFaustLibrariesPath,
                      "Absolute path to directory containing your custom "
