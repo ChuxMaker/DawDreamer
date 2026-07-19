@@ -545,6 +545,17 @@ int FaustProcessor::getDynamicVoices()
     return m_dynamicVoices;
 };
 
+void FaustProcessor::setExposePolyParams(bool exposePolyParams)
+{
+    m_compileState = kNotCompiled;
+    m_exposePolyParams = exposePolyParams;
+};
+
+bool FaustProcessor::getExposePolyParams()
+{
+    return m_exposePolyParams;
+};
+
 bool FaustProcessor::setDSPString(const std::string& code)
 {
     m_compileState = kNotCompiled;
@@ -1261,12 +1272,16 @@ void FaustProcessor::createParameterLayout()
         // like how MPE works.
         if (m_nvoices > 0)
         {
-            if (hasEnding(parnameString, std::string("/freq")) ||
-                hasEnding(parnameString, std::string("/note")) ||
-                hasEnding(parnameString, std::string("/gain")) ||
-                hasEnding(parnameString, std::string("/gate")) ||
-                hasEnding(parnameString, std::string("/vel")) ||
-                hasEnding(parnameString, std::string("/velocity")))
+            // aifi Track 2: hidden by default because the poly engine drives these
+            // via MIDI; expose_poly_params=True opts into seeing and driving them
+            // directly (the MPE-style use the comment above invites).
+            if (!m_exposePolyParams &&
+                (hasEnding(parnameString, std::string("/freq")) ||
+                 hasEnding(parnameString, std::string("/note")) ||
+                 hasEnding(parnameString, std::string("/gain")) ||
+                 hasEnding(parnameString, std::string("/gate")) ||
+                 hasEnding(parnameString, std::string("/vel")) ||
+                 hasEnding(parnameString, std::string("/velocity"))))
             {
                 continue;
             }
@@ -1360,6 +1375,29 @@ nb::list FaustProcessor::getPluginParametersDescription()
             myDictionary["max"] = m_ui->getParamMax(faustIndex);
             myDictionary["step"] = step;
             myDictionary["value"] = this->getAutomationAtZero(theName);
+
+            // aifi Track 2: forward the Faust-declared UI metadata + init + group
+            // that the description used to drop. NOTE: APIUI::getMetadata(int)
+            // (the map form) returns c_str() pointers into a LOCAL copy of the
+            // metadata map - dangling the moment it returns. Use the two-arg key
+            // lookup, which points into the live fMetaData store.
+            myDictionary["init"] = m_ui->getParamInit(faustIndex);
+            static const char* kMetaKeys[] = {"unit",    "scale",  "style", "midi",
+                                              "tooltip", "hidden", "type"};
+            for (const char* key : kMetaKeys)
+            {
+                const char* metaVal = m_ui->getMetadata(faustIndex, key);
+                if (metaVal != nullptr)
+                {
+                    myDictionary[key] = std::string(metaVal);
+                }
+            }
+            // group = the containing UI box (the full path minus the leaf label)
+            std::string paramAddress(m_ui->getParamAddress(faustIndex));
+            auto lastSlash = paramAddress.rfind('/');
+            myDictionary["group"] = (lastSlash == std::string::npos)
+                                        ? std::string("")
+                                        : paramAddress.substr(0, lastSlash);
 
             myList.append(myDictionary);
             i++;

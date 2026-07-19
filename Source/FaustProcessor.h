@@ -212,6 +212,9 @@ class FaustProcessor : public ProcessorBase
 
     nb::list getPluginParametersDescription();
 
+    bool getExposePolyParams();
+    void setExposePolyParams(bool exposePolyParams);
+
     void setNumVoices(int numVoices);
     int getNumVoices();
 
@@ -762,6 +765,7 @@ class FaustProcessor : public ProcessorBase
 
     double m_releaseLengthSec = 0.5;
     double m_velPower = 1.0;
+    bool m_exposePolyParams = false;
 
     void applyVelPower();
 
@@ -903,6 +907,13 @@ inline void create_bindings_for_faust_processor(nb::module_& m)
                      "If enabled (default), voices are dynamically enabled and "
                      "disabled to save computation. This parameter only matters "
                      "if polyphony is enabled.")
+        .def_prop_rw("expose_poly_params", &FaustProcessor::getExposePolyParams,
+                     &FaustProcessor::setExposePolyParams,
+                     "Expose the reserved per-voice polyphony parameters (freq/"
+                     "note/gain/gate/vel/velocity) in the parameter tree instead "
+                     "of hiding them - MPE-style per-voice introspection and "
+                     "control. Default False (the stock layout, byte-identical). "
+                     "Takes effect at the next compile, like num_voices.")
         .def_prop_rw("release_length", &FaustProcessor::getReleaseLength,
                      &FaustProcessor::setReleaseLength,
                      "If using polyphony, specifying the release length accurately can "
