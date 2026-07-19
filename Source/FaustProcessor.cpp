@@ -688,6 +688,73 @@ bool FaustProcessor::compileFromBitcode(const std::string& bitcode)
     return initFromFactory();
 }
 
+void FaustProcessor::writeMachineCode(const std::string& path)
+{
+    // Precondition: compiled. getTarget() MUST match at write- and read-time
+    // (native object code is not portable across CPUs - key any cache on it).
+    if (m_nvoices > 0)
+    {
+        if (!m_poly_factory)
+        {
+            throw std::runtime_error(
+                "FaustProcessor::writeMachineCode: no poly factory - compile first.");
+        }
+        writePolyDSPFactoryToMachineFile(m_poly_factory, path, getTarget());
+    }
+    else
+    {
+        if (!m_factory)
+        {
+            throw std::runtime_error(
+                "FaustProcessor::writeMachineCode: no factory - compile first.");
+        }
+        if (!writeDSPFactoryToMachineFile(m_factory, path, getTarget()))
+        {
+            throw std::runtime_error(
+                "FaustProcessor::writeMachineCode: writeDSPFactoryToMachineFile "
+                "failed: " + path);
+        }
+    }
+}
+
+bool FaustProcessor::compileFromMachineCode(const std::string& path)
+{
+    // Mirror compileFromBitcode, POLY-AWARE (the bitcode path is mono-only and
+    // NULL-derefs if forced poly - this path branches on m_nvoices explicitly).
+    // num_voices must be set BEFORE calling so the poly/mono path matches the
+    // saved factory.
+    m_compileState = kNotCompiled;
+    clear();
+
+    std::string error_msg;
+    auto target = getTarget();
+
+    if (m_nvoices > 0)
+    {
+        // readPolyDSPFactoryFromMachineFile always constructs an
+        // llvm_dsp_poly_factory (or returns NULL); its declared return type is
+        // the dsp_poly_factory base, hence the static_cast.
+        m_poly_factory = static_cast<llvm_dsp_poly_factory*>(
+            readPolyDSPFactoryFromMachineFile(path, target, error_msg));
+        if (!m_poly_factory)
+        {
+            throw std::runtime_error(
+                "FaustProcessor::compileFromMachineCode (poly) failed: " + error_msg);
+        }
+    }
+    else
+    {
+        m_factory = readDSPFactoryFromMachineFile(path, target, error_msg);
+        if (!m_factory)
+        {
+            throw std::runtime_error(
+                "FaustProcessor::compileFromMachineCode (mono) failed: " + error_msg);
+        }
+    }
+
+    return initFromFactory();
+}
+
 bool FaustProcessor::initFromFactory()
 {
     // Create DSP instance from the factory (either mono or poly).
