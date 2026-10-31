@@ -902,12 +902,14 @@ inline void create_bindings_for_faust_processor(nb::module_& m)
              "recompilation from source. Bitcode can be obtained from the "
              "processor's pickle state dict.")
         .def("write_machine_code", &FaustProcessor::writeMachineCode, arg("path"),
+             nb::call_guard<nb::gil_scoped_release>(),
              "Write the compiled factory to native object code (poly: "
              "<path>_machine_process.o / <path>_machine_effect.o). Reloading it "
              "skips LLVM codegen entirely, so renders are byte-identical across "
              "processes.")
         .def("compile_from_machine_code", &FaustProcessor::compileFromMachineCode,
              arg("path"),
+             nb::call_guard<nb::gil_scoped_release>(),
              "Restore a factory from object code written by write_machine_code "
              "(no recompile, no codegen). Set num_voices BEFORE calling so the "
              "poly/mono path matches the saved factory; the machine target must "

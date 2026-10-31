@@ -690,6 +690,8 @@ bool FaustProcessor::compileFromBitcode(const std::string& bitcode)
 
 void FaustProcessor::writeMachineCode(const std::string& path)
 {
+    std::lock_guard<std::mutex> lock(faustCompileMutex);
+
     // Precondition: compiled. getTarget() MUST match at write- and read-time
     // (native object code is not portable across CPUs - key any cache on it).
     if (m_nvoices > 0)
@@ -723,6 +725,8 @@ bool FaustProcessor::compileFromMachineCode(const std::string& path)
     // NULL-derefs if forced poly - this path branches on m_nvoices explicitly).
     // num_voices must be set BEFORE calling so the poly/mono path matches the
     // saved factory.
+    std::lock_guard<std::mutex> lock(faustCompileMutex);
+
     m_compileState = kNotCompiled;
     clear();
 
