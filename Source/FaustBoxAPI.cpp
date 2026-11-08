@@ -2,6 +2,8 @@
 #include "FaustBoxAPI.h"
 #include "FaustArgvBuilder.h"
 
+#include <faust/compiler/errors/exception.hh>
+
 #ifdef WIN32
 #include <assert.h>
 #include <stdio.h>
