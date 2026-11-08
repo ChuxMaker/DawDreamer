@@ -130,8 +130,10 @@ bool PluginProcessor::loadPlugin(double sampleRate, int samplesPerBlock)
     ProcessorBase::setBusesLayout(myPlugin->getBusesLayout());
 
     this->setPlayConfigDetails(inputs, outputs, sampleRate, samplesPerBlock);
-    myPlugin->prepareToPlay(sampleRate, samplesPerBlock);
+    // Offline before prepare: the VST3 host passes the mode to setupProcessing only on the first
+    // prepareToPlay, and a later prepare at the same rate and block size returns early.
     myPlugin->setNonRealtime(true);
+    myPlugin->prepareToPlay(sampleRate, samplesPerBlock);
     mySampleRate = sampleRate;
 
     createParameterLayout();
