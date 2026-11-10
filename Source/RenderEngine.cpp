@@ -70,6 +70,82 @@ bool RenderEngine::render(const double renderLength, bool isBeats)
 
     int64_t numRenderedSamples = getRenderLength(renderLength, isBeats);
 
+    prepareRender(numRenderedSamples, numRenderedSamples);
+    renderBlocks(m_renderTotalBlocks);
+    finishRender();
+
+    return true;
+}
+
+int64_t RenderEngine::renderBegin(const double renderLength, int64_t chunkSamples, bool isBeats)
+{
+    if (m_stringDag.empty())
+    {
+        throw std::runtime_error("Cannot render an empty graph.");
+    }
+    if (chunkSamples <= 0)
+    {
+        throw std::runtime_error("The chunk of a chunked render must be at least one sample.");
+    }
+
+    int64_t numRenderedSamples = getRenderLength(renderLength, isBeats);
+
+    m_renderChunkBlocks =
+        std::max<int64_t>(1, (int64_t)std::ceil(((double)chunkSamples) / (double)myBufferSize));
+    const int64_t firstWindow =
+        std::min<int64_t>(numRenderedSamples, m_renderChunkBlocks * (int64_t)myBufferSize);
+
+    prepareRender(numRenderedSamples, firstWindow);
+
+    return numRenderedSamples;
+}
+
+int64_t RenderEngine::renderChunk()
+{
+    if (!m_renderActive)
+    {
+        return 0;
+    }
+
+    const int64_t offset = m_renderBlocksDone * (int64_t)myBufferSize;
+    const int64_t numBlocks =
+        std::min<int64_t>(m_renderChunkBlocks, m_renderTotalBlocks - m_renderBlocksDone);
+    const int64_t numSamples =
+        std::min<int64_t>(numBlocks * (int64_t)myBufferSize, m_renderTotalSamples - offset);
+
+    if (numSamples <= 0)
+    {
+        finishRender();
+        return 0;
+    }
+
+    setRecordWindows(offset, numSamples);
+    renderBlocks(numBlocks);
+
+    if (m_renderBlocksDone >= m_renderTotalBlocks)
+    {
+        finishRender();
+    }
+
+    return numSamples;
+}
+
+void RenderEngine::setRecordWindows(int64_t offset, int64_t numSamples)
+{
+    for (auto& entry : m_stringDag)
+    {
+        auto node = m_mainProcessorGraph->getNodeForId(m_UniqueNameToNodeID[entry.first]);
+        auto processor = dynamic_cast<ProcessorBase*>(node->getProcessor());
+
+        if (processor)
+        {
+            processor->setRecordWindow(offset, (int)numSamples);
+        }
+    }
+}
+
+void RenderEngine::prepareRender(int64_t numRenderedSamples, int64_t recordSamples)
+{
     auto numberOfBuffers =
         myBufferSize == 1 ? numRenderedSamples
                           : (int64_t)std::ceil(((double)numRenderedSamples) / (double)myBufferSize);
@@ -126,9 +202,9 @@ bool RenderEngine::render(const double renderLength, bool isBeats)
         }
     }
 
-    AudioSampleBuffer audioBuffer(audioBufferNumChans, myBufferSize);
+    m_renderBuffer = std::make_unique<AudioSampleBuffer>(audioBufferNumChans, myBufferSize);
 
-    bool lastProcessorRecordEnable = false;
+    m_lastProcessorRecordEnable = false;
 
     for (auto& entry : m_stringDag)
     {
@@ -140,10 +216,10 @@ bool RenderEngine::render(const double renderLength, bool isBeats)
             if (entry == m_stringDag.at(m_stringDag.size() - 1))
             {
                 // Always force the last processor to record.
-                lastProcessorRecordEnable = processor->getRecordEnable();
+                m_lastProcessorRecordEnable = processor->getRecordEnable();
                 processor->setRecordEnable(true);
             }
-            processor->setRecorderLength((int)numRenderedSamples);
+            processor->setRecorderLength((int)numRenderedSamples, (int)recordSamples);
         }
         else
         {
@@ -156,11 +232,18 @@ bool RenderEngine::render(const double renderLength, bool isBeats)
     // in reset.
     m_mainProcessorGraph->reset();
 
-    MidiBuffer renderMidiBuffer;
+    m_renderMidiBuffer = MidiBuffer();
+    m_renderTotalSamples = numRenderedSamples;
+    m_renderTotalBlocks = numberOfBuffers;
+    m_renderBlocksDone = 0;
+    m_renderActive = true;
+}
 
+void RenderEngine::renderBlocks(int64_t numBlocks)
+{
     double stepInMinutes = double(myBufferSize) / (mySampleRate * 60);
 
-    for (int64_t i = 0; i < numberOfBuffers; ++i)
+    for (int64_t i = 0; i < numBlocks; ++i)
     {
         m_positionInfo.setBpm(getBPM(*m_positionInfo.getPpqPosition()));
 
@@ -170,7 +253,7 @@ bool RenderEngine::render(const double renderLength, bool isBeats)
             processor->recordAutomation(m_positionInfo, myBufferSize);
         }
 
-        m_mainProcessorGraph->processBlock(audioBuffer, renderMidiBuffer);
+        m_mainProcessorGraph->processBlock(*m_renderBuffer, m_renderMidiBuffer);
 
         m_positionInfo.setTimeInSamples(*m_positionInfo.getTimeInSamples() + (int64_t)myBufferSize);
         m_positionInfo.setTimeInSeconds(double(*m_positionInfo.getTimeInSamples()) / mySampleRate);
@@ -178,13 +261,18 @@ bool RenderEngine::render(const double renderLength, bool isBeats)
                                       stepInMinutes * *m_positionInfo.getBpm());
     }
 
+    m_renderBlocksDone += numBlocks;
+}
+
+void RenderEngine::finishRender()
+{
     m_positionInfo.setIsPlaying(false);
     m_positionInfo.setIsRecording(false);
 
     // processBlock once more because PluginProcessor will look at
     // the playhead's isPlaying value, which was just set to false,
     // to know that we should send MIDI note off messages to all channels.
-    m_mainProcessorGraph->processBlock(audioBuffer, renderMidiBuffer);
+    m_mainProcessorGraph->processBlock(*m_renderBuffer, m_renderMidiBuffer);
 
     // restore the record-enable of the last processor.
     if (m_stringDag.size())
@@ -195,11 +283,12 @@ bool RenderEngine::render(const double renderLength, bool isBeats)
 
         if (processor)
         {
-            processor->setRecordEnable(lastProcessorRecordEnable);
+            processor->setRecordEnable(m_lastProcessorRecordEnable);
         }
     }
 
-    return true;
+    m_renderBuffer.reset();
+    m_renderActive = false;
 }
 
 int64_t RenderEngine::getRenderLength(const double renderLength, bool isBeats)

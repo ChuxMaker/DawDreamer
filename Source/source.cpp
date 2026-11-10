@@ -476,6 +476,17 @@ Unlike a VST, the parameters don't need to be between 0 and 1. For example, you 
              "False, duration is measured in seconds, otherwise beats. "
              "The GIL is released during rendering, so multiple engines can "
              "render concurrently on Python threads.")
+        .def("render_begin", &RenderEngine::renderBegin, arg("duration"), arg("chunk_samples"),
+             kw_only(), arg("beats") = false,
+             "Start a chunked render of the most recently loaded graph and "
+             "return its length in samples. Each `render_chunk` then renders "
+             "the next `chunk_samples`, rounded up to whole blocks.")
+        .def("render_chunk", &RenderEngine::renderChunk,
+             nb::call_guard<nb::gil_scoped_release>(),
+             "Render the next chunk of a render started by `render_begin` and "
+             "return how many samples it rendered, 0 once the render is done. "
+             "Until the next call, `get_audio` returns that chunk alone. The "
+             "audio is the same as `render` writes.")
         .def("set_bpm", &RenderEngine::setBPM, arg("bpm"),
              "Set the beats-per-minute of the engine as a constant rate.")
         .def("set_bpm", &RenderEngine::setBPMwithPPQN, arg("bpm"), arg("ppqn"),

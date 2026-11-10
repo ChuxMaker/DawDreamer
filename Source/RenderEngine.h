@@ -48,6 +48,15 @@ class RenderEngine : public AudioPlayHead
 
     bool render(const double renderLength, bool isBeats);
 
+    // The chunked render: renderBegin prepares the graph and returns the render's length
+    // in samples, and each renderChunk renders the next `chunk_samples` (rounded up to
+    // whole blocks) and returns how many samples it rendered, 0 once the render is done.
+    // Between calls getAudioFrames returns that chunk alone, so a caller reads a long
+    // render without the engine holding all of it. The blocks, the automation, and the
+    // position are those of render().
+    int64_t renderBegin(const double renderLength, int64_t chunkSamples, bool isBeats);
+    int64_t renderChunk();
+
     int64_t getRenderLength(const double renderLength, bool isBeats);
 
     void setBPM(double bpm);
@@ -679,6 +688,20 @@ class RenderEngine : public AudioPlayHead
     std::vector<ProcessorBase*> m_connectedProcessors;
 
     PositionInfo m_positionInfo;
+
+    // The state of a render between renderBegin and its last renderChunk.
+    void prepareRender(int64_t numRenderedSamples, int64_t recordSamples);
+    void renderBlocks(int64_t numBlocks);
+    void finishRender();
+    void setRecordWindows(int64_t offset, int64_t numSamples);
+    std::unique_ptr<AudioSampleBuffer> m_renderBuffer;
+    MidiBuffer m_renderMidiBuffer;
+    bool m_lastProcessorRecordEnable = false;
+    bool m_renderActive = false;
+    int64_t m_renderTotalSamples = 0;
+    int64_t m_renderTotalBlocks = 0;
+    int64_t m_renderBlocksDone = 0;
+    int64_t m_renderChunkBlocks = 0;
     AudioSampleBuffer m_bpmAutomation;
     std::uint32_t m_BPM_PPQN = 960;
 

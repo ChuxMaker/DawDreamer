@@ -269,9 +269,15 @@ void ProcessorBase::processBlock(juce::AudioSampleBuffer& buffer, juce::MidiBuff
     }
 
     const int numberChannels = myRecordBuffer.getNumChannels();
-    int numSamplesToCopy = std::min(buffer.getNumSamples(), myRecordBuffer.getNumSamples() -
-                                                                int(*posInfo->getTimeInSamples()));
-    int writePos = int(*posInfo->getTimeInSamples());
+    // The write position is relative to the record window, which a whole render starts at 0.
+    const int64_t relPos = int64_t(*posInfo->getTimeInSamples()) - m_recordOffset;
+    if (relPos < 0 || relPos >= int64_t(myRecordBuffer.getNumSamples()))
+    {
+        return;
+    }
+    int writePos = int(relPos);
+    int numSamplesToCopy =
+        std::min(buffer.getNumSamples(), myRecordBuffer.getNumSamples() - writePos);
 
     for (int chan = 0; chan < numberChannels; chan++)
     {
@@ -311,11 +317,25 @@ nb::ndarray<nb::numpy, float> ProcessorBase::getAudioFrames()
     return bufferToPyArray(myRecordBuffer);
 }
 
-void ProcessorBase::setRecorderLength(int numSamples)
+void ProcessorBase::setRecorderLength(int numSamples, int bufferSamples)
 {
     m_expectedRecordNumSamples = numSamples;
+    m_recordOffset = 0;
 
     int numChannels = this->getTotalNumOutputChannels();
 
-    myRecordBuffer.setSize(numChannels, m_recordEnable ? numSamples : 0);
+    myRecordBuffer.setSize(numChannels,
+                           m_recordEnable ? (bufferSamples < 0 ? numSamples : bufferSamples) : 0);
+}
+
+void ProcessorBase::setRecordWindow(int64_t offset, int numSamples)
+{
+    m_recordOffset = offset;
+
+    int numChannels = this->getTotalNumOutputChannels();
+
+    // keepExistingContent false, clearExtraSpace true, avoidReallocating true: every window
+    // starts silent and the allocation of the first window serves the rest.
+    myRecordBuffer.setSize(numChannels, m_recordEnable ? numSamples : 0, false, true, true);
+    myRecordBuffer.clear();
 }

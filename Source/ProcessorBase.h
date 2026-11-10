@@ -148,7 +148,14 @@ class ProcessorBase : public juce::AudioProcessor
 
     nb::ndarray<nb::numpy, float> getAudioFrames();
 
-    void setRecorderLength(int numSamples);
+    // `numSamples` is the render's length. The record buffer holds `bufferSamples` of it,
+    // the whole render when `bufferSamples` is negative.
+    void setRecorderLength(int numSamples, int bufferSamples = -1);
+
+    // Record only the window of the render that starts at sample `offset` and runs
+    // `numSamples`: a chunked render (RenderEngine::renderChunk) reads the record buffer
+    // one window at a time. The expected render length is unchanged.
+    void setRecordWindow(int64_t offset, int numSamples);
 
     virtual int getTotalNumOutputChannels() { return AudioProcessor::getTotalNumOutputChannels(); }
 
@@ -211,6 +218,7 @@ class ProcessorBase : public juce::AudioProcessor
     bool m_recordAutomation = false;
 
     int m_expectedRecordNumSamples = 0;
+    int64_t m_recordOffset = 0;
     std::map<std::string, juce::AudioSampleBuffer> m_recordedAutomationDict;
 
     BusesLayout makeBusesLayout(int inputs, int outputs)
